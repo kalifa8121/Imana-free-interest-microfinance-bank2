@@ -12,9 +12,12 @@ app = Flask(__name__)
 app.secret_key = "imana_free_interest_microfinance_secret_key"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
-BACKUP_FOLDER = os.path.join(BASE_DIR, 'backups')
-DB_PATH = os.path.join(BASE_DIR, "web_banking.db")
+
+# Render Persistent Volume Support (Yoo /data jiraate achi fayyadama, yoo hin jirre folder BASE_DIR fayyada)
+DATA_DIR = "/data" if os.path.exists("/data") else BASE_DIR
+UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
+BACKUP_FOLDER = os.path.join(DATA_DIR, 'backups')
+DB_PATH = os.path.join(DATA_DIR, "web_banking.db")
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -23,7 +26,7 @@ app.config['BACKUP_FOLDER'] = BACKUP_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(BACKUP_FOLDER, exist_ok=True)
 
-# --- 1. OPTIMIZATION FOR NETWORK & RENDER DEPLOYMENT ---
+# --- 1. OPTIMIZATION FOR NETWORK & RENDER DEPLOYMENT (Prevent 500 Internal Server Error) ---
 def get_db_connection(max_retries=10, delay=0.5):
     for attempt in range(max_retries):
         try:
@@ -79,7 +82,6 @@ def init_db():
         ]
         cursor.executemany("INSERT INTO users VALUES (?, ?, ?, ?)", default_users)
 
-    # 5. Database Table maammilaa irratti freeze_status fi freeze_reason dabalameera
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS customers (
             customer_id TEXT PRIMARY KEY,
@@ -130,6 +132,25 @@ def init_db():
     conn.close()
 
 init_db()
+
+# AUTO BACKUP FUNCTION ON STARTUP/TRANSACTION
+def auto_backup_db():
+    try:
+        now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"auto_backup_{now_str}.db"
+        backup_file_path = os.path.join(BACKUP_FOLDER, backup_filename)
+        with get_db_connection() as src_conn:
+            with sqlite3.connect(backup_file_path) as dst_conn:
+                src_conn.backup(dst_conn)
+        # Old backups cleanup (keep latest 10)
+        backups = sorted([os.path.join(BACKUP_FOLDER, f) for f in os.listdir(BACKUP_FOLDER) if f.endswith('.db')])
+        if len(backups) > 10:
+            for old_b in backups[:-10]:
+                os.remove(old_b)
+    except Exception as e:
+        print(f"Auto Backup Error: {e}")
+
+auto_backup_db()
 
 def get_bank_capital():
     conn = get_db_connection()
@@ -209,7 +230,6 @@ HTML_LAYOUT = """
         
         .pwd-toggle { position: absolute; right: 10px; top: 32px; cursor: pointer; user-select: none; font-size: 14px; }
         
-        /* Modal for Manager Info */
         .modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; }
         .modal-content { background: white; padding: 20px; border-radius: 12px; max-width: 450px; width: 90%; max-height: 85vh; overflow-y: auto; }
     </style>
@@ -358,7 +378,6 @@ def dashboard():
         <a href="/auditor_close" class="btn-card btn-card-auditor"><span class="icon">🔒</span><span>Cufiinsa Herrega Galgalaa</span></a>
         """
 
-    # 4 & 9. CEO Formii Risiita Duwwaa fi Comishina
     ceo_btn = ""
     if role == 'CEO':
         ceo_btn = """
@@ -391,7 +410,6 @@ def dashboard():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content))
 
-# --- 3. MANAGER APPROVAL WALIIN BUTTON VIEW SUURAA, MALLATTOO FI UGGURA ---
 @app.route('/pending')
 def pending():
     if 'role' not in session or session['role'] != 'MANAGER':
@@ -447,7 +465,7 @@ def pending():
             <div class="item-card">
                 <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
                     <span style="font-size:12px; font-weight:bold; color:#065f46;">FT Ref: {r['ft_reference']}</span>
-                    <span class="badge badge-pending">{r['status']}</span>
+                    <span class="badge badge-pending">PENDING APPROVAL</span>
                 </div>
                 <div style="font-size:13px; font-weight:bold;">{r['txn_type']}: {r['amount']:,.2f} Birr ({r['bank_name']})</div>
                 <div style="font-size:11px; color:#64748b; margin-bottom:8px;">Maammila: <b>{r['customer_name']}</b> ({r['customer_id']})</div>
@@ -533,7 +551,6 @@ def manager_action(act, txn_id):
 
             total_deduction = amount + commission
 
-            # 5. Yoo uggurri jiraate deposit malee baasii/transfer hin danda'amu
             if freeze_st == 'FROZEN' and txn_type in ['WITHDRAWAL', 'T24_TRANSFER']:
                 cursor.execute("UPDATE transactions SET status = 'REJECTED_CUSTOMER_FROZEN' WHERE txn_id = ?", (txn_id,))
             elif txn_type in ['WITHDRAWAL', 'T24_TRANSFER'] and curr_bal < total_deduction:
@@ -559,7 +576,6 @@ def manager_action(act, txn_id):
     conn.close()
     return redirect('/pending')
 
-# --- 4. FORMII RISIITA DUWWAA KAN CEO PRINT GODHU ---
 @app.route('/ceo_blank_form')
 def ceo_blank_form():
     if 'role' not in session or session['role'] != 'CEO':
@@ -609,7 +625,6 @@ def ceo_blank_form():
     </html>
     """
 
-# --- 5. BAKKA CEO MAAMMILA IRRA UGGURA KAAYU / KAASU ---
 @app.route('/freeze_customer/<cust_id>', methods=['POST'])
 def freeze_customer(cust_id):
     if 'role' not in session or session['role'] != 'CEO':
@@ -781,6 +796,7 @@ def approve_reversal(role_type, rev_id):
     conn.close()
     return redirect('/reversals_list')
 
+# --- 5. CEO BACKUP & RESTORE ---
 @app.route('/ceo_backup', methods=['GET', 'POST'])
 def ceo_backup():
     if 'role' not in session or session['role'] != 'CEO':
@@ -818,7 +834,7 @@ def ceo_backup():
     content = f"""
     <div class="box">
         <h2 style="font-size: 16px; color:#581c87; margin-bottom: 4px;">💾 Safe Data Backup & Restore (CEO)</h2>
-        <p style="font-size: 11px; color:#64748b; margin-bottom: 16px;">System-ni Python osoo hin dhaamne nagaani SQLite DB download / save godhaa.</p>
+        <p style="font-size: 11px; color:#64748b; margin-bottom: 16px;">System-ni auto save & backup kan godhamu yoo ta'uu, safe- ta'uuf DB download / restore godhaa.</p>
         
         {msg_html}
 
@@ -859,7 +875,6 @@ def download_db():
     except Exception as e:
         return f"Backup download error: {str(e)}", 500
 
-# --- 5 & 8. LISTII MAAMMILIIN UGGURAMEERAA FI BUTTON CEO/HOJJATTOOTAA ---
 @app.route('/customers')
 def customers():
     if 'role' not in session:
@@ -953,7 +968,7 @@ def customers():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content))
 
-# --- 6 & 8. RISIITA MAKER PRINT GODHU (NO STATUS, SENDER & RECEIVER INCLUDED, ANY WORKER CAN PRINT) ---
+# --- 1 & 8. RISIITA MAKER PRINT GODHU (NO STATUS - REMOVED PENDING/APPROVED) ---
 @app.route('/receipt/<txn_id>')
 def print_receipt(txn_id):
     if 'role' not in session:
@@ -978,7 +993,6 @@ def print_receipt(txn_id):
     if not t:
         return "Transaction Hin Argamne", 404
 
-    # 6B. Transfer yoo ta'e Sender fi Receiver gadditti agarsiisuu
     transfer_details = ""
     if t['txn_type'] == 'T24_TRANSFER':
         transfer_details = f"""
@@ -986,7 +1000,7 @@ def print_receipt(txn_id):
         <div class="row"><span>Nama Fudhate (Receiver):</span><b>{target_name} (Acc: {t['target_account']})</b></div>
         """
 
-    # 6A. Status APPROVED ykn PENDING risiita irratti HIN MULLATU
+    # 1. Status 'APPROVED' fi 'PENDING' guutumaan guutuutti dhiifameera (haqameera)
     receipt_html = f"""
     <!DOCTYPE html>
     <html>
@@ -1240,7 +1254,6 @@ def toggle_user(username):
     conn.close()
     return redirect('/manage_users')
 
-# --- 8. HOJJATAAN HUNDI RISIITA MAAMMILA HUNDAA PRINT GODHUU DANDA'A ---
 @app.route('/maker_receipts')
 def maker_receipts():
     if 'role' not in session:
@@ -1258,12 +1271,10 @@ def maker_receipts():
 
     rows_html = ""
     for t in txns:
-        badge_cls = "badge-active" if t['status'] == 'APPROVED' else ("badge-danger" if 'REJECTED' in t['status'] else "badge-pending")
         rows_html += f"""
         <div class="item-card">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <span style="font-size:12px; font-weight:bold; color:#065f46;">{t['ft_reference']}</span>
-                <span class="badge {badge_cls}">{t['status']}</span>
             </div>
             <div style="font-size:13px; font-weight:bold; margin-top:4px;">{t['txn_type']}: {t['amount']:,.2f} Birr</div>
             <div style="font-size:11px; color:#64748b;">Maammila: {t['customer_name']} | Maker: {t['created_by']} | Guyyaa: {t['timestamp']}</div>
@@ -1279,7 +1290,7 @@ def maker_receipts():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content))
 
-# --- 7. REGISTER WITH INITIAL BALANCE (BALANSII JALQABAA) ---
+# --- 3. REGISTER WITH INITIAL BALANCE (NEGATIVE PREVENTED) ---
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if 'role' not in session or session['role'] != 'MAKER':
@@ -1289,39 +1300,59 @@ def register():
     if request.method == 'POST':
         full_name = request.form.get('full_name').strip()
         phone = request.form.get('phone').strip()
-        initial_balance = float(request.form.get('initial_balance', 0.0))
-        photo_file = request.files.get('photo')
-        sig_file = request.files.get('signature')
+        
+        try:
+            initial_balance = float(request.form.get('initial_balance', 0.0))
+        except ValueError:
+            initial_balance = 0.0
 
-        if photo_file and sig_file and allowed_file(photo_file.filename) and allowed_file(sig_file.filename):
-            timestamp_str = int(datetime.datetime.now().timestamp())
-            photo_filename = f"face_{timestamp_str}_" + secure_filename(photo_file.filename)
-            sig_filename = f"sig_{timestamp_str}_" + secure_filename(sig_file.filename)
+        if initial_balance < 0:
+            msg = "❌ Error: Balansiin ka'umsaa negative ta'uu HIN DANDA'U!"
+        else:
+            photo_file = request.files.get('photo')
+            sig_file = request.files.get('signature')
 
-            photo_file.save(os.path.join(app.config['UPLOAD_FOLDER'], photo_filename))
-            sig_file.save(os.path.join(app.config['UPLOAD_FOLDER'], sig_filename))
+            if photo_file and sig_file and allowed_file(photo_file.filename) and allowed_file(sig_file.filename):
+                timestamp_str = int(datetime.datetime.now().timestamp())
+                photo_filename = f"face_{timestamp_str}_" + secure_filename(photo_file.filename)
+                sig_filename = f"sig_{timestamp_str}_" + secure_filename(sig_file.filename)
 
-            START_ID = 100099008800
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT MAX(CAST(customer_id AS INTEGER)) FROM customers WHERE customer_id >= '100099008800'")
-            max_id = cursor.fetchone()[0]
+                photo_file.save(os.path.join(app.config['UPLOAD_FOLDER'], photo_filename))
+                sig_file.save(os.path.join(app.config['UPLOAD_FOLDER'], sig_filename))
 
-            if max_id is None or max_id < START_ID:
-                cust_id = str(START_ID)
-            else:
-                cust_id = str(max_id + 1)
+                START_ID = 100099008800
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute("SELECT MAX(CAST(customer_id AS INTEGER)) FROM customers WHERE customer_id >= '100099008800'")
+                max_id = cursor.fetchone()[0]
 
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if max_id is None or max_id < START_ID:
+                    cust_id = str(START_ID)
+                else:
+                    cust_id = str(max_id + 1)
 
-            cursor.execute("""
-                INSERT INTO customers (customer_id, full_name, phone, photo_path, signature_path, balance, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL', ?)
-            """, (cust_id, full_name, phone, photo_filename, sig_filename, initial_balance, now))
-            conn.commit()
-            conn.close()
-            msg = f"⏳ Maammilli {full_name} (Initial Balance: {initial_balance:,.2f} Birr) galmaa'eera! (T24 Acc: {cust_id}). MANAGER'n ACTIVE akka ta'u mirkaneessuu qaba."
+                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                cursor.execute("""
+                    INSERT INTO customers (customer_id, full_name, phone, photo_path, signature_path, balance, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL', ?)
+                """, (cust_id, full_name, phone, photo_filename, sig_filename, initial_balance, now))
+                
+                # Balansii ka'umsaa deposit akka ta'utti transaction keessattis galmeessuu
+                if initial_balance > 0:
+                    today_code = datetime.datetime.now().strftime("%y%j")
+                    ft_ref = f"FT{today_code}{random.randint(10000, 99999)}"
+                    txn_id = f"TXN-INIT-{int(datetime.datetime.now().timestamp())}"
+                    cursor.execute("""
+                        INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, target_account, amount, commission, bank_name, ft_reference, status, created_by, timestamp)
+                        VALUES (?, 'DEPOSIT', ?, ?, '', ?, 0.0, 'Imana Microfinance Core', ?, 'PENDING_MANAGER', ?, ?)
+                    """, (txn_id, cust_id, full_name, initial_balance, ft_ref, session['username'], now))
+
+                conn.commit()
+                conn.close()
+                auto_backup_db()
+                msg = f"⏳ Maammilli {full_name} (Initial Balance: {initial_balance:,.2f} Birr) galmaa'eera! (T24 Acc: {cust_id}). MANAGER'n ACTIVE akka ta'u mirkaneessuu qaba."
 
     content = f"""
     <div class="box">
@@ -1338,7 +1369,7 @@ def register():
             </div>
             <div class="form-group">
                 <label>Balansii Jalqabaa (Initial Balance in Birr)</label>
-                <input type="number" step="0.01" name="initial_balance" value="0.00" required class="input-field">
+                <input type="number" step="0.01" min="0" name="initial_balance" value="0.00" required class="input-field">
             </div>
             <div class="form-group">
                 <label>📸 Suuraa Fuula Maammilaa</label>
@@ -1354,6 +1385,7 @@ def register():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content))
 
+# --- 1. TRANSACTION WITH INSTANT PREVIEW & AUTO PRINT (MAKER) ---
 @app.route('/transaction', methods=['GET', 'POST'])
 def transaction():
     if 'role' not in session or session['role'] != 'MAKER':
@@ -1368,53 +1400,96 @@ def transaction():
     msg = None
     msg_color = "#dcfce7"
     text_color = "#166534"
+    preview_txn = None
 
     if request.method == 'POST':
         txn_type = request.form.get('txn_type')
         cust_id = request.form.get('customer_id')
         target_account = request.form.get('target_account', '').strip()
-        amount = float(request.form.get('amount'))
+        
+        try:
+            amount = float(request.form.get('amount', 0.0))
+        except ValueError:
+            amount = 0.0
+
         bank_name = request.form.get('bank_name')
 
-        commission = 0.0
-        if txn_type == 'WITHDRAWAL':
-            commission = get_commission(amount)
-
-        total_deduction = amount + commission
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT full_name, balance, freeze_status FROM customers WHERE customer_id = ?", (cust_id,))
-        cust_row = cursor.fetchone()
-        cust_name = cust_row['full_name'] if cust_row else "Unknown"
-        cust_balance = cust_row['balance'] if cust_row else 0.0
-        cust_freeze = cust_row['freeze_status'] if cust_row else "UNFROZEN"
-
-        # 5. Yoo maammilli ugguramee jiraate Deposit malee baasii fi transfer hin danda'amu
-        if cust_freeze == 'FROZEN' and txn_type in ['WITHDRAWAL', 'T24_TRANSFER']:
-            msg = f"❌ UGGURA! Maammilli kun CEO'n Uggurameera. Deposit malee Baasii ykn Transfer godhuu HIN DANDA'U!"
-            msg_color = "#fee2e2"
-            text_color = "#991b1b"
-        elif txn_type in ['WITHDRAWAL', 'T24_TRANSFER'] and cust_balance < total_deduction:
-            msg = f"❌ Balance Check Failed! Balance maammilaa ({cust_balance:,.2f} Birr) maallaqa gaafatame fi comishiniif ({total_deduction:,.2f} Birr) gadi!"
+        if amount <= 0:
+            msg = "❌ Error: Hamma qarshii negetive ykn 0 ta'uu HIN DANDA'U!"
             msg_color = "#fee2e2"
             text_color = "#991b1b"
         else:
-            today_code = datetime.datetime.now().strftime("%y%j")
-            ft_ref = f"FT{today_code}{random.randint(10000, 99999)}"
-            txn_id = f"TXN-{int(datetime.datetime.now().timestamp())}"
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            commission = 0.0
+            if txn_type == 'WITHDRAWAL':
+                commission = get_commission(amount)
 
-            cursor.execute("""
-                INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, target_account, amount, commission, bank_name, ft_reference, status, created_by, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_MANAGER', ?, ?)
-            """, (txn_id, txn_type, cust_id, cust_name, target_account, amount, commission, bank_name, ft_ref, session['username'], now))
-            conn.commit()
-            msg = f"⏳ {txn_type} Ref: {ft_ref} ({amount:,.2f} Birr) Manager Approval eegaa jira!"
+            total_deduction = amount + commission
 
-        conn.close()
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT full_name, balance, freeze_status FROM customers WHERE customer_id = ?", (cust_id,))
+            cust_row = cursor.fetchone()
+            cust_name = cust_row['full_name'] if cust_row else "Unknown"
+            cust_balance = cust_row['balance'] if cust_row else 0.0
+            cust_freeze = cust_row['freeze_status'] if cust_row else "UNFROZEN"
+
+            if cust_freeze == 'FROZEN' and txn_type in ['WITHDRAWAL', 'T24_TRANSFER']:
+                msg = f"❌ UGGURA! Maammilli kun CEO'n Uggurameera. Deposit malee Baasii ykn Transfer godhuu HIN DANDA'U!"
+                msg_color = "#fee2e2"
+                text_color = "#991b1b"
+            elif txn_type in ['WITHDRAWAL', 'T24_TRANSFER'] and cust_balance < total_deduction:
+                msg = f"❌ Balance Check Failed! Balance maammilaa ({cust_balance:,.2f} Birr) maallaqa gaafatame fi comishiniif ({total_deduction:,.2f} Birr) gadi!"
+                msg_color = "#fee2e2"
+                text_color = "#991b1b"
+            else:
+                today_code = datetime.datetime.now().strftime("%y%j")
+                ft_ref = f"FT{today_code}{random.randint(10000, 99999)}"
+                txn_id = f"TXN-{int(datetime.datetime.now().timestamp())}"
+                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                cursor.execute("""
+                    INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, target_account, amount, commission, bank_name, ft_reference, status, created_by, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_MANAGER', ?, ?)
+                """, (txn_id, txn_type, cust_id, cust_name, target_account, amount, commission, bank_name, ft_ref, session['username'], now))
+                conn.commit()
+                auto_backup_db()
+                
+                msg = f"⏳ {txn_type} Ref: {ft_ref} ({amount:,.2f} Birr) galmaa'eera! Preview gama jalatti ilaaluun print godhaa."
+                
+                preview_txn = {
+                    'txn_id': txn_id,
+                    'ft_reference': ft_ref,
+                    'txn_type': txn_type,
+                    'customer_name': cust_name,
+                    'customer_id': cust_id,
+                    'amount': amount,
+                    'bank_name': bank_name,
+                    'timestamp': now,
+                    'created_by': session['username']
+                }
+
+            conn.close()
 
     options_html = "".join([f'<option value="{c["customer_id"]}">{c["full_name"]} (Acc: {c["customer_id"]} | Bal: {c["balance"]:,.2f} Birr {"🔒 FROZEN" if c["freeze_status"]=="FROZEN" else ""})</option>' for c in active_customers])
+
+    preview_html = ""
+    if preview_txn:
+        preview_html = f"""
+        <div class="box" style="background:#f0fdf4; border: 2px dashed #16a34a; margin-top:20px;">
+            <h3 style="font-size:14px; color:#166534; text-align:center; margin-bottom:10px;">🧾 LIVE PREVIEW RECEIPT (Nagahee)</h3>
+            <div style="font-size:12px; line-height:1.8; color:#0f172a;">
+                <div><b>FT Ref:</b> {preview_txn['ft_reference']}</div>
+                <div><b>Guyyaa:</b> {preview_txn['timestamp']}</div>
+                <div><b>Gosa Hojii:</b> {preview_txn['txn_type']}</div>
+                <div><b>Maammila:</b> {preview_txn['customer_name']} ({preview_txn['customer_id']})</div>
+                <div><b>Hamma Qarshii:</b> <b style="color:#065f46; font-size:15px;">{preview_txn['amount']:,.2f} Birr</b></div>
+                <div><b>Maker:</b> {preview_txn['created_by']}</div>
+            </div>
+            <div style="text-align:center; margin-top:14px;">
+                <a href="/receipt/{preview_txn['txn_id']}" target="_blank" class="btn-submit" style="background:#047857; text-decoration:none; display:inline-block; padding:10px 20px;">🖨️ Nagahee Kaa Maxxansi (Print)</a>
+            </div>
+        </div>
+        """
 
     content = f"""
     <div class="box">
@@ -1445,7 +1520,7 @@ def transaction():
 
             <div class="form-group">
                 <label>Hamma Qarshii (Birr)</label>
-                <input type="number" step="0.01" name="amount" required class="input-field">
+                <input type="number" step="0.01" min="0.01" name="amount" required class="input-field">
             </div>
             <div class="form-group">
                 <label>Baankii</label>
@@ -1454,8 +1529,10 @@ def transaction():
                     <option value="CBE (T24 Core)">CBE (T24 Core)</option>
                 </select>
             </div>
-            <button type="submit" class="btn-submit">Galchi Transaction</button>
+            <button type="submit" class="btn-submit">Galchi Transaction & Preview Ilaali</button>
         </form>
+
+        {preview_html}
     </div>
 
     <script>
@@ -1518,7 +1595,7 @@ def approve_cust(cust_id):
 
     return redirect('/pending')
 
-# --- 2. STATEMENT WITH RUNNING BALANCE (BALANSII JIJJIIRAMAA) ---
+# --- 2. STATEMENT WITH ACCURATE RUNNING BALANCE ---
 @app.route('/statement/<cust_id>')
 def statement(cust_id):
     if 'role' not in session:
@@ -1533,7 +1610,6 @@ def statement(cust_id):
         conn.close()
         return "Maammilli Hin Argamne", 404
 
-    # Transactions tartiira sa'aatiin soddoomsaa dhiheessuu
     cursor.execute("""
         SELECT txn_id, ft_reference, txn_type, amount, commission, status, timestamp, created_by, customer_id, target_account
         FROM transactions 
@@ -1551,7 +1627,6 @@ def statement(cust_id):
         comm = t['commission']
         t_type = t['txn_type']
         
-        # Balance calculation per transaction step
         if t_type == 'DEPOSIT':
             running_balance += amt
         elif t_type == 'WITHDRAWAL':
@@ -1600,7 +1675,6 @@ def statement(cust_id):
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content))
 
-# --- 9. COMISHINII GUYYAA CEO'F ---
 @app.route('/ceo_commission')
 def ceo_commission():
     if 'role' not in session or session['role'] != 'CEO':
@@ -1799,4 +1873,5 @@ def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
